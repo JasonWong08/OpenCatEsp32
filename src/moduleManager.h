@@ -233,9 +233,27 @@ void stopModule(char moduleCode) {
 #ifdef CAMERA
     case EXTENSION_CAMERA:
       {
-        // cameraStop();   // Todo
+        Serial.println("Stopping camera module...");
+        // 专门清理Grove Vision AI V2资源
+#ifdef GROVE_VISION_AI_V2
+        if (GroveVisionQ) {
+          groveVisionCleanup();
+        }
+#endif
+        // 通用摄像头清理
         cameraSetupSuccessful = false;
         cameraTaskActiveQ = 0;
+        // 清理全局状态
+        detectedObjectQ = false;
+        updateCoordinateLock = false;
+        xCoord = -1;
+        yCoord = -1;
+        width = 0;
+        height = 0;
+        
+        // 给清理过程一些时间
+        delay(100);
+        Serial.println("Camera module stopped.");
         break;
       }
 #endif
@@ -277,8 +295,8 @@ void reconfigureTheActiveModule(char *moduleCode) {
   // PTHL("mode", moduleCode);                                          // negative number will deactivate all the modules
   for (byte i = 0; i < sizeof(moduleList) / sizeof(char); i++) {                                               // disable unneeded modules
     if (moduleActivatedQ[i] && moduleList[i] != moduleCode[0]) {                                               // if the modules is active and different from the new module
-      if ((moduleList[i] == EXTENSION_VOICE || moduleList[i] == EXTENSION_BACKTOUCH) && moduleCode[0] != '~')  // it won't disable the voice and backtouch
-        continue;
+      // if ((moduleList[i] == EXTENSION_VOICE || moduleList[i] == EXTENSION_BACKTOUCH) && moduleCode[0] != '~')  // it won't disable the voice and backtouch
+      //   continue;
       PTHL("- disable", moduleNames[i]);
       stopModule(moduleList[i]);
       moduleActivatedQ[i] = false;

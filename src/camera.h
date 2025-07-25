@@ -333,9 +333,6 @@ void taskReadCamera(void *par) {
   while (cameraTaskActiveQ) {
 #ifndef USE_WIRE1
     while (
-#ifdef GYRO_PIN
-        imuLockI2c ||  // wait for the imu to release lock. potentially to cause dead lock with camera
-#endif
         gestureLockI2c ||  // wait for the gesture to release lock. potentially to cause dead lock with camera
         eepromLockI2c)     // wait for the EEPROM operations to complete
       delay(1);
@@ -631,7 +628,41 @@ void read_Sentry2Camera() {
 #endif
 
 #ifdef GROVE_VISION_AI_V2
-SSCMA AI;
+SSCMA* AI_ptr = nullptr;  // 使用指针管理AI对象
+bool groveVisionInitialized = false;  // 跟踪初始化状态
+
+// 安全初始化检查
+void ensureAIObjectSafety() {
+  // 确保AI指针在安全状态 - 避免删除，只重置状态
+  if (AI_ptr != nullptr && !groveVisionInitialized) {
+    Serial.println("Warning: AI pointer exists but not marked as initialized, resetting state...");
+    // 不删除对象，只重置状态标志
+    groveVisionInitialized = false;
+    cameraSetupSuccessful = false;
+  }
+}
+
+// 检测Grove Vision AI V2设备
+bool detectGroveVisionDevice() {
+  Serial.println("Detecting Grove Vision AI V2 device...");
+  
+  // 尝试多个可能的I2C地址
+  uint8_t addresses[] = {0x62, 0x63, 0x60, 0x61};
+  int addressCount = sizeof(addresses) / sizeof(addresses[0]);
+  
+  for (int i = 0; i < addressCount; i++) {
+    Wire.beginTransmission(addresses[i]);
+    byte error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.print("Grove Vision AI V2 device found at address 0x");
+      Serial.println(addresses[i], HEX);
+      return true;
+    }
+  }
+  
+  Serial.println("Grove Vision AI V2 device not found at any expected address");
+  return false;
+}
 
 // OPT_ANGLE values
 enum OptAngle : uint16_t {
@@ -647,79 +678,262 @@ enum OptResolution : uint8_t {
   OPT_DETAIL_480,  // 480*480 Auto
   OPT_DETAIL_640,  // 640*480 Auto
 };
+
+// Grove Vision AI V2 清理函数
+void groveVisionCleanup() {
+  if (!groveVisionInitialized) {
+    return; // 如果没有初始化，直接返回
+  }
+  
+  Serial.println("Cleaning up Grove Vision AI V2 resources...");
+  
+  // 停止摄像头任务
+  if (cameraTaskActiveQ) {
+    cameraTaskActiveQ = false;
+    
+    // 等待摄像头任务结束
+    int timeout = 0;
+    while (timeout < 1000) { // 增加超时时间
+      delay(10);
+      timeout += 10;
+      // 检查任务是否已经结束
+      if (TASK_HandleCamera == NULL || eTaskGetState(TASK_HandleCamera) == eDeleted) {
+        break;
+      }
+    }
+    
+    // 如果任务仍未结束，强制删除
+    if (TASK_HandleCamera != NULL && eTaskGetState(TASK_HandleCamera) != eDeleted) {
+      Serial.println("Force deleting camera task...");
+      vTaskDelete(TASK_HandleCamera);
+      TASK_HandleCamera = NULL;
+    }
+  }
+  
+  // 不删除AI对象，避免内存问题 - 只重置状态
+  Serial.println("Resetting AI object state...");
+  
+  // 清理全局状态
+  cameraSetupSuccessful = false;
+  detectedObjectQ = false;
+  updateCoordinateLock = false;
+  
+  // 重置坐标
+  xCoord = -1;
+  yCoord = -1;
+  width = 0;
+  height = 0;
+  lastXcoord = -1;
+  lastYcoord = -1;
+  
+  // 清理I2C锁状态（通过extern声明访问）
+  extern bool cameraLockI2c;
+  cameraLockI2c = false;
+  
+  // 标记为未初始化
+  groveVisionInitialized = false;
+  
+  // 给系统时间完成清理，但避免过长延时
+  delay(100);
+  
+  Serial.println("Grove Vision AI V2 cleanup completed (keeping AI object).");
+}
+
 void groveVisionSetup() {
-  PTLF("Setup Grove Vision AI Module");
-  // CAMERA_WIRE.begin(10, 9, 400000);
-  AI.begin(&CAMERA_WIRE);
+  Serial.println("Setup Grove Vision AI Module");
+  
+  // 安全检查
+  ensureAIObjectSafety();
+  
+  // 如果已经初始化，先清理资源
+  if (groveVisionInitialized) {
+    Serial.println("Grove Vision AI V2 already initialized, cleaning up first...");
+    groveVisionCleanup();
+    delay(500); // 给清理过程更多时间
+  }
 
   // End the TASK_imu task when activating Grove Vision AI V2
 #ifdef GYRO_PIN
   extern TaskHandle_t TASK_imu;
   extern bool imuTaskRunning;
+  extern bool imuLockI2c;
+  extern bool updateGyroQ;
+  
   if (TASK_imu != NULL) {
-    imuTaskRunning = false;  // 直接设置运行标志来优雅地结束IMU任务
+    Serial.println("Terminating IMU task...");
+    // 首先停止IMU更新
+    updateGyroQ = false;
+    
+    // 设置任务结束标志
+    imuTaskRunning = false;
+    
     // 等待任务自然结束
-    while (eTaskGetState(TASK_imu) != eDeleted) {
-      delay(1);
+    int timeout = 0;
+    while (eTaskGetState(TASK_imu) != eDeleted && timeout < 2000) {
+      delay(10);
+      timeout += 10;
     }
+    
+    // 强制清理I2C锁状态
+    imuLockI2c = false;
+    
+    // 清理任务句柄
     TASK_imu = NULL;
-    PTLF("Terminated TASK_imu task gracefully");
+    
+    // 给I2C总线一些时间稳定
+    delay(300);
+    
+    Serial.println("IMU task terminated gracefully");
   }
 #endif
+
+  // 检查I2C设备是否存在 - 简化版本，避免Wire.end()
+  if (!detectGroveVisionDevice()) {
+    Serial.println("Grove Vision AI V2 device not found");
+    Serial.println("Please check device connection and power");
+    return; // 如果设备不存在，直接返回
+  }
+  
+  // 创建新的AI对象 - 只创建一次，避免重复创建删除
+  Serial.println("Creating AI object...");
+  if (AI_ptr == nullptr) {
+    AI_ptr = new SSCMA();
+    if (AI_ptr == nullptr) {
+      Serial.println("Failed to create AI object!");
+      return;
+    }
+    delay(200); // 给对象创建更多时间
+  }
+  
+  // 初始化AI对象 - 简化版本
+  Serial.println("Initializing AI object...");
+  AI_ptr->begin(&CAMERA_WIRE);
+  delay(500); // 给AI对象初始化充分时间
 
   uint8_t count = 0;
   bool sensorEnable = true;
   uint16_t sensorVal =
       OPT_DETAIL_240
-      + (strcmp(MODEL, "Bittle X+Arm") ? OPT_ANGLE_90 : OPT_ANGLE_0);  // 240*240, rotate 90 degrees if Bittle R
-
-  Serial.println("Set sensor angle and resolution...");
+      + (strcmp(MODEL, "Bittle X+Arm") ? OPT_ANGLE_90 : OPT_ANGLE_0);  // 240*240, rotate 90 degrees if Bittle X+Arm
+  Serial.println("Setting sensor angle and resolution...");
+  PTHL("compare value:", strcmp(MODEL, "Bittle X+Arm"));
   do {
-    delay(10);
-    if (CMD_OK == AI.setSensor(sensorEnable, sensorVal)) {
+    delay(300); // 增加更多延时
+    Serial.print("Sensor setup attempt ");
+    Serial.print(count + 1);
+    Serial.print("/3, using sensorVal: 0x");
+    Serial.println(sensorVal, HEX);
+    
+    int sensorResult = AI_ptr->setSensor(sensorEnable, sensorVal);
+    if (CMD_OK == sensorResult) {
       cameraSetupSuccessful = true;
+      groveVisionInitialized = true; // 标记为已初始化
+      Serial.println("Grove Vision AI V2 sensor setup successful!");
       break;
+    } else {
+      Serial.print("Grove Vision AI V2 sensor setup failed, attempt ");
+      Serial.print(count + 1);
+      Serial.print("/3, error code: ");
+      Serial.println(sensorResult);
+      
+      // 如果是第二次尝试，尝试不同的参数
+      if (count == 1) {
+        Serial.println("Trying different sensor parameters...");
+        sensorVal = OPT_DETAIL_240 + OPT_ANGLE_0; // 尝试0度
+      }
+      
+      // 在重试前增加延时，但避免过长的延时
+      if (count < 2) {
+        delay(200);
+      }
     }
     count++;
-    PTHL("count:", count);
   } while (count < 3);
+  
+  if (!cameraSetupSuccessful) {
+    Serial.println("Grove Vision AI V2 setup failed after 3 attempts!");
+    Serial.println("Device may not be ready or incompatible");
+    
+    // 简单的清理，避免内存操作
+    groveVisionInitialized = false;
+    cameraSetupSuccessful = false;
+    
+    // 不删除AI对象，避免内存问题
+    Serial.println("Keeping AI object for potential retry");
+  } else {
+    Serial.println("Grove Vision AI V2 setup completed successfully!");
+  }
 }
 
 void read_GroveVision() {
-  if (cameraSetupSuccessful && !AI.invoke()) {
-    if (AI.boxes().size() >= 1) {
+  if (!cameraSetupSuccessful || !groveVisionInitialized || AI_ptr == nullptr) {
+    return; // 如果摄像头设置失败或AI对象不存在，直接返回
+  }
+  
+  // 添加安全检查，避免访问无效对象
+  try {
+    int invokeResult = AI_ptr->invoke();
+    if (invokeResult != 0) {
+      // AI.invoke()失败时的调试信息
+      static int errorCount = 0;
+      errorCount++;
+      if (errorCount % 100 == 1) { // 每100次错误打印一次，避免信息过多
+        Serial.print("AI.invoke() failed, error code: ");
+        Serial.print(invokeResult);
+        Serial.print(", error count: ");
+        Serial.println(errorCount);
+      }
+      return;
+    }
+    
+    // 检查boxes()是否有效
+    if (AI_ptr->boxes().size() >= 1) {
       updateCoordinateLock = true;
-      xCoord = AI.boxes()[0].x;  // read x value
-      yCoord = AI.boxes()[0].y;  // read y value
-      width = AI.boxes()[0].w;  // read width value
-      height = AI.boxes()[0].h;  // read height value
+      
+      // 添加坐标有效性检查
+      int newXCoord = AI_ptr->boxes()[0].x;
+      int newYCoord = AI_ptr->boxes()[0].y;
+      int newWidth = AI_ptr->boxes()[0].w;
+      int newHeight = AI_ptr->boxes()[0].h;
+      
+      // 简单的坐标有效性检查
+      if (newXCoord >= 0 && newXCoord <= 240 && 
+          newYCoord >= 0 && newYCoord <= 240 &&
+          newWidth > 0 && newHeight > 0) {
+        xCoord = newXCoord;  // read x value
+        yCoord = newYCoord;  // read y value
+        width = newWidth;    // read width value
+        height = newHeight;  // read height value
+        detectedObjectQ = true;
+      } else {
+        // 坐标无效时的调试信息
+        static int invalidCoordCount = 0;
+        invalidCoordCount++;
+        if (invalidCoordCount % 50 == 1) { // 每50次打印一次
+          Serial.print("Invalid coordinates detected: x=");
+          Serial.print(newXCoord);
+          Serial.print(", y=");
+          Serial.print(newYCoord);
+          Serial.print(", w=");
+          Serial.print(newWidth);
+          Serial.print(", h=");
+          Serial.println(newHeight);
+        }
+      }
+      
       updateCoordinateLock = false;
-      detectedObjectQ = true;
-      // if (cameraPrintQ)
-      // {
-      //   for (int i = 0; i < AI.boxes().size(); i++)
-      //   {
-      //     Serial.print("Box[");
-      //     Serial.print(i);
-      //     Serial.print("] target=");
-      //     Serial.print(AI.boxes()[i].target);
-      //     Serial.print(", score=");
-      //     Serial.print(AI.boxes()[i].score);
-      //     Serial.print(", x=");
-      //     Serial.print(AI.boxes()[i].x);
-      //     Serial.print(", y=");
-      //     Serial.print(AI.boxes()[i].y);
-      //     Serial.print(", w=");
-      //     Serial.print(AI.boxes()[i].w);
-      //     Serial.print(", h=");
-      //     Serial.println(AI.boxes()[i].h);
-      //   }
-      // }
-      if (cameraPrintQ == 2) 
-      {
+      
+      // 打印调试信息（如果需要）
+      if (cameraPrintQ == 2) {
+        extern void FPS();
         FPS();
       }
     }
+  } catch (...) {
+    // 捕获任何异常，避免程序崩溃
+    Serial.println("Exception caught in read_GroveVision, resetting camera state");
+    updateCoordinateLock = false;
+    detectedObjectQ = false;
   }
 }
 #endif
