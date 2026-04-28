@@ -77,7 +77,7 @@
 #define BOARD "B"
 #endif
 
-#define DATE "260207"  // YYMMDD
+#define DATE "260428"  // YYMMDD
 String SoftwareVersion = "";
 String uniqueName = "";
 
@@ -424,6 +424,13 @@ byte fps = 0;
 int targetCycles = 0;       // Target number of gait cycles to complete
 int completedCycles = 0;    // Number of gait cycles completed so far
 bool cycleCountingMode = false;  // Whether cycle counting mode is active
+
+// When true, suppress immediate echo of token 'k' after parameterized gait commands (cycles / time / turning angle).
+// Completion echoes token once when the queued "up" task loads or equivalent completion runs.
+bool deferSkillTokenEcho = false;
+
+// Set only by TaskQueue::loadTaskInfo when a queued step is popped (not tied to newCmdIdx / command source markers).
+bool skillCmdFromTaskQueue = false;
 
 char token;
 char lastToken;

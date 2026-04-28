@@ -1418,6 +1418,9 @@ void reaction() {  // Reminder:  reaction() is repeatedly called in the "forever
         }
       case T_SKILL:
         {
+          // Queue-loaded skill steps must not clear defer; otherwise time-based gait replays clear defer before "up".
+          if (!skillCmdFromTaskQueue)
+            deferSkillTokenEcho = false;
           // Parse skill command and arguments
           char skillName[CMD_LEN + 1];
           char *spacePos = strchr(newCmd, ' ');
@@ -1470,9 +1473,10 @@ void reaction() {  // Reminder:  reaction() is repeatedly called in the "forever
                   tQueue->addTask('k', skillName, timeOrAngle);
                   tQueue->addTask('k', "up");
                   PTH("Time-based mode: ", skillName);
-                  PTHL(" for ", timeOrAngle);
+                  PTH(" for ", timeOrAngle);
                   PTL(" ms");
                 }
+                deferSkillTokenEcho = true;
               } else if (lastChar == 'L' || lastChar == 'R') {
                 // Turning gait - set up turning control
                 // Note: wkR should turn counterclockwise (negative yaw), wkL should turn clockwise (positive yaw)
@@ -1489,6 +1493,7 @@ void reaction() {  // Reminder:  reaction() is repeatedly called in the "forever
                 PTHL(" initial yaw: ", initialYawAngle);
                 PTHL(" target angle: ", targetYawAngle);
                 PTHL(" turning direction: ", lastChar == 'R' ? "RIGHT (CCW)" : "LEFT (CW)");
+                deferSkillTokenEcho = true;
               }
             }
             // if (skill->period > 0)
@@ -1525,17 +1530,24 @@ void reaction() {  // Reminder:  reaction() is repeatedly called in the "forever
       //   strcpy(lastCmd, "up");
     }
 
+    bool queueCompletesParameterizedGait =
+        deferSkillTokenEcho && skillCmdFromTaskQueue && token == T_SKILL && !strcmp(newCmd, "up");
+    if (queueCompletesParameterizedGait)
+      deferSkillTokenEcho = false;
+
     if (token != T_SKILL || skill->period > 0) {  // it will change the token and affect strcpy(lastCmd, newCmd)
+      if (!deferSkillTokenEcho || queueCompletesParameterizedGait) {
         printToAllPorts(token);                     // postures, gaits and other tokens can confirm completion by sending the token back
-      if (lastToken == T_SKILL
-          && (lowerToken == T_GYRO || lowerToken == T_INDEXED_SIMULTANEOUS_ASC || lowerToken == T_INDEXED_SEQUENTIAL_ASC
-              || lowerToken == T_PAUSE || token == T_JOINTS || token == T_RANDOM_MIND || token == T_BALANCE_SLOPE
-              || token == T_ACCELERATE || token == T_DECELERATE || token == T_TILT))
-        token = T_SKILL;
+        if (lastToken == T_SKILL
+            && (lowerToken == T_GYRO || lowerToken == T_INDEXED_SIMULTANEOUS_ASC || lowerToken == T_INDEXED_SEQUENTIAL_ASC
+                || lowerToken == T_PAUSE || token == T_JOINTS || token == T_RANDOM_MIND || token == T_BALANCE_SLOPE
+                || token == T_ACCELERATE || token == T_DECELERATE || token == T_TILT))
+          token = T_SKILL;
 #ifdef WEB_SERVER
-      // 仅在此分支（已在本轮打印 token）时通知 Web 任务完成；one-shot 技能在下方打印 'k' 后再调用 finishWebCommand()
-      finishWebCommand();
+        // Notify Web completion when token is echoed here; one-shot behaviors echo 'k' later (see below).
+        finishWebCommand();
 #endif
+      }
     }
     resetCmd();
 #ifdef PWM_LED_PIN
