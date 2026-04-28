@@ -1443,9 +1443,8 @@ void reaction() {  // Reminder:  reaction() is repeatedly called in the "forever
           
           if (!strcmp("x", skillName)        // x for random skill
               || strcmp(lastCmd, skillName)  // won't transform for the same gait.
-              || skill->period <= 1) {    // skill->period can be NULL!
-            // it's better to compare skill->skillName and newCmd.
-            // but need more logics for non skill cmd in between
+              || skill->period <= 1          // skill->period can be NULL!
+              || (spacePos != NULL && timeOrAngle > 0)) {
             if (!strcmp(skillName, "bk"))
               strcpy(skillName, "bkF");
             
